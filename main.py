@@ -1,11 +1,11 @@
 """DCEMI render EMI recipes as images, in discord.
 
 Three slash commands, mirroring the DCEMI socket protocol:
-  - `/recipe <item>` — the friendly one: autocompletes the item id, then pages
+  - `/recipe <item>` - the friendly one: autocompletes the item id, then pages
     through every recipe for that item with ◀ ▶ buttons (uses /list + /recipe +
     /render under the hood).
-  - `/list <query>`  — search EMI's item index by substring (discovery).
-  - `/render <recipe_id>` — render one recipe by its raw id (advanced/debug).
+  - `/list <query>`  - search EMI's item index by substring.
+  - `/render <recipe_id>` - render one recipe by its raw id.
 
 Connect-only: it talks to a running DCEMI renderer over TCP (DCEMI_HOST/
 DCEMI_PORT, default 127.0.0.1:25599).
@@ -18,11 +18,38 @@ from discord import app_commands
 from discord.ext import commands
 
 from api import commands as apicommands
+from api import gui
 from . import client
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(DCEMI(bot))
+
+
+async def _open_recipes(interaction: discord.Interaction, item: str) -> None:
+    try:
+        ids = await client.recipes(item)
+    except client.DcemiError as e:
+        await interaction.followup.send(f":warning: {e}")
+        return
+    if isinstance(ids, dict) or not ids:
+        await interaction.followup.send(f"No recipes found for `{item}`.")
+        return
+    view = RecipeView(item, ids)
+    embed, file = await view.render()
+    if file is None:
+        await interaction.followup.send(":warning: Failed to render recipe.")
+        return
+    await interaction.followup.send(embed=embed, file=file, view=view)
+
+
+def _recipe_card(title: str, rid: str, png: bytes, index: int = 0, total: int = 1):
+    file = discord.File(io.BytesIO(png), filename="recipe.png")
+    embed = discord.Embed(title=title, description=f"`{rid}`")
+    if total > 1:
+        embed.set_footer(text=f"Recipe {index + 1}/{total}")
+    embed.set_image(url="attachment://recipe.png")
+    return embed, file
 
 
 class DCEMI(apicommands.Cog):
@@ -33,20 +60,7 @@ class DCEMI(apicommands.Cog):
     @app_commands.describe(item="Item id, e.g. minecraft:iron_sword")
     async def recipe(self, interaction: discord.Interaction, item: str):
         await interaction.response.defer()
-        try:
-            ids = await client.recipes(item)
-        except client.DcemiError as e:
-            return await interaction.followup.send(f":warning: {e}")
-
-        if isinstance(ids, dict) or not ids:
-            return await interaction.followup.send(f"No recipes found for `{item}`.")
-
-        view = RecipeView(item, ids)
-        embed, file = await view.render()
-        if file is None:
-            return await interaction.followup.send(":warning: Failed to render recipe.")
-        await interaction.followup.send(embed=embed, file=file, view=view)
-        return None
+        await _open_recipes(interaction, item)
 
     @recipe.autocomplete("item")
     async def item_autocomplete(self, interaction: discord.Interaction, current: str):
@@ -70,9 +84,8 @@ class DCEMI(apicommands.Cog):
         if not items:
             return await interaction.followup.send(f"No items match `{query}`.")
 
-        view = ListView(query, items)
-        await interaction.followup.send(
-            embed=view.embed(), view=view if view.pages > 1 else discord.utils.MISSING)
+        view = ItemListUI({"query": query, "items": items})
+        await interaction.followup.send(embed=view.embed, view=view)
         return None
 
     @app_commands.command(name="render", description="Render one recipe by its id (from /recipe) to an image")
@@ -88,11 +101,49 @@ class DCEMI(apicommands.Cog):
             return await interaction.followup.send(
                 f":warning: Could not render `{recipe_id}` (unknown recipe id or render error).")
 
-        file = discord.File(io.BytesIO(png), filename="recipe.png")
-        embed = discord.Embed(title="Render", description=f"`{recipe_id}`")
-        embed.set_image(url="attachment://recipe.png")
+        embed, file = _recipe_card(recipe_id, recipe_id, png)
         await interaction.followup.send(embed=embed, file=file)
         return None
+
+
+class ItemListUI(gui.PageUI):
+    ROW = 3
+    PER_PAGE = (ROW - 1) * 5
+
+    def __init__(self, data_transfer=None, page: int = 1):
+        data = data_transfer or {"query": "", "items": []}
+        items = data["items"]
+        embed = discord.Embed(
+            title=f"Items matching “{data['query']}”",
+            description=f"{len(items)} match(es) — click an item to see its recipes.",
+        )
+        super().__init__(
+            element_count=len(items),
+            data_transfer=data,
+            embed=embed,
+            page=page,
+            row=self.ROW,
+        )
+        self._add_item_buttons(items, page)
+
+    def _add_item_buttons(self, items, page):
+        start = (page - 1) * self.PER_PAGE
+        for offset, item in enumerate(items[start:start + self.PER_PAGE]):
+            button = discord.ui.Button(
+                label=item[:80],
+                custom_id=f"dcemi_item_{start + offset}",
+                row=offset // 5,
+            )
+            button.callback = self._open(item)
+            self.add_item(button)
+
+    @staticmethod
+    def _open(item: str):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await _open_recipes(interaction, item)
+
+        return callback
 
 
 class RecipeView(discord.ui.View):
@@ -111,10 +162,7 @@ class RecipeView(discord.ui.View):
         if png is None:
             return None, None
 
-        file = discord.File(io.BytesIO(png), filename="recipe.png")
-        embed = discord.Embed(title=self.item, description=f"`{rid}`")
-        embed.set_footer(text=f"Recipe {self.index + 1}/{len(self.ids)}")
-        embed.set_image(url="attachment://recipe.png")
+        embed, file = _recipe_card(self.item, rid, png, self.index, len(self.ids))
         self._sync_buttons()
         return embed, file
 
@@ -140,48 +188,5 @@ class RecipeView(discord.ui.View):
         await self._go(interaction, -1)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="dcemi_next")
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._go(interaction, +1)
-
-
-class ListView(discord.ui.View):
-    """Paginated view over /list results — a query like 'stone' can match 90+
-    items, more than one Discord message can show, so page through them ◀ ▶."""
-
-    PAGE_SIZE = 40
-
-    def __init__(self, query: str, items: list[str]):
-        super().__init__(timeout=300)
-        self.query = query
-        self.items = items
-        self.page = 0
-        self.pages = max(1, (len(items) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-
-    def embed(self) -> discord.Embed:
-        start = self.page * self.PAGE_SIZE
-        chunk = self.items[start:start + self.PAGE_SIZE]
-        body = "\n".join(f"`{i}`" for i in chunk)
-        embed = discord.Embed(title=f"Items matching “{self.query}”", description=body)
-        embed.set_footer(text=f"Page {self.page + 1}/{self.pages} · {len(self.items)} match(es)")
-        self._sync_buttons()
-        return embed
-
-    def _sync_buttons(self):
-        for child in self.children:
-            if child.custom_id == "dcemi_list_prev":
-                child.disabled = self.page == 0
-            elif child.custom_id == "dcemi_list_next":
-                child.disabled = self.page >= self.pages - 1
-
-    async def _go(self, interaction: discord.Interaction, delta: int):
-        self.page = min(max(self.page + delta, 0), self.pages - 1)
-        await interaction.response.defer()
-        await interaction.edit_original_response(embed=self.embed(), view=self)
-
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="dcemi_list_prev", disabled=True)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._go(interaction, -1)
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="dcemi_list_next")
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._go(interaction, +1)
