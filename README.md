@@ -2,14 +2,14 @@
 
 A [Sonny](https://github.com/driftbluestone/sonny) extension that renders
 Minecraft recipes using EMI Widgets as images in Discord.
-**[DCEMI](https://github.com/BgameXL/dcemi)** — the headless renderer does
+**[DCEMI](https://github.com/BgameXL/dcemi)** the headless renderer does
 the work; this extension just talks to it over TCP and posts the pictures.
 
 ## Commands
 
-- `/recipe <item>` — autocompletes the item id, then pages through every recipe for that item with ◀ ▶ buttons.
-- `/list <query>` — search EMI item index by substring.
-- `/render <recipe_id>` — render one recipe by its raw id.
+- `/recipe <item>` - autocompletes the item id, then pages through every recipe for that item with ◀ ▶ buttons.
+- `/list <query>` - search EMI item index by substring.
+- `/render <recipe_id>` - render one recipe by its raw id.
 
 ## Install in Sonny bot
 
